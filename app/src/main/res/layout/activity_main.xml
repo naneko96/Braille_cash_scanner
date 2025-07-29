@@ -74,4 +74,16 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <View
+        android:id="@+id/scanIndicator"
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentEnd="true"
+        android:layout_margin="16dp"
+        android:background="@android:color/holo_red_dark"
+        android:alpha="0"
+        android:elevation="10dp"
+        android:shape="oval" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>
