@@ -5,7 +5,10 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
 import android.os.Bundle;
+import android.speech.tts.TextToSpeech;
+import android.util.Log;
 import android.util.Size;
+import android.view.View;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -28,6 +31,8 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.Arrays;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -37,10 +42,15 @@ public class MainActivity extends AppCompatActivity {
     private Interpreter tflite;
     private ExecutorService cameraExecutor;
     private ActivityResultLauncher<String> requestPermissionLauncher;
+    private TextToSpeech tts;
+    private View scanIndicator;
 
     private static final int MODEL_INPUT_SIZE = 180;
     private static final String MODEL_PATH = "banknote_model.tflite";
-    private final String[] labels = {"10dt", "20dt", "50dt", "100dt", "200dt"};
+    private final String[] labels = {"خمسة دنانير", "عشرة دنانير", "عشرون دينار", "خمسون دينار", "لا شيء"};
+
+    private long lastAnalysisTime = 0;
+    private boolean isAnalyzing = true;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -50,16 +60,30 @@ public class MainActivity extends AppCompatActivity {
 
         if (getSupportActionBar() != null) getSupportActionBar().hide();
 
+        scanIndicator = binding.getRoot().findViewById(R.id.scanIndicator);
+
         try {
             tflite = new Interpreter(loadModelFile());
         } catch (IOException e) {
             e.printStackTrace();
-            Toast.makeText(this, "Failed to load model", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "فشل في تحميل النموذج", Toast.LENGTH_LONG).show();
             finish();
             return;
         }
 
         cameraExecutor = Executors.newSingleThreadExecutor();
+
+        tts = new TextToSpeech(this, status -> {
+            if (status == TextToSpeech.SUCCESS) {
+                int result = tts.setLanguage(new Locale("ar"));
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    Log.e("TTS", "اللغة العربية غير مدعومة");
+                    Toast.makeText(this, "TTS العربية غير مدعومة على هذا الجهاز", Toast.LENGTH_LONG).show();
+                }
+            } else {
+                Log.e("TTS", "فشل في تهيئة TTS");
+            }
+        });
 
         requestPermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(),
@@ -67,7 +91,7 @@ public class MainActivity extends AppCompatActivity {
                     if (isGranted) {
                         startCamera();
                     } else {
-                        Toast.makeText(MainActivity.this, "Camera permission denied", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, "تم رفض إذن الكاميرا", Toast.LENGTH_SHORT).show();
                     }
                 });
 
@@ -110,33 +134,66 @@ public class MainActivity extends AppCompatActivity {
 
             } catch (Exception e) {
                 e.printStackTrace();
-                Toast.makeText(this, "Failed to start camera", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "فشل في تشغيل الكاميرا", Toast.LENGTH_SHORT).show();
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
-    private long lastAnalysisTime = 0;
-
     private void analyzeImage(@NonNull ImageProxy imageProxy) {
+        if (!isAnalyzing) {
+            imageProxy.close();
+            return;
+        }
+
         long currentTime = System.currentTimeMillis();
-        if (currentTime - lastAnalysisTime < 2000) {
+        if (currentTime - lastAnalysisTime < 1000) {
             imageProxy.close();
             return;
         }
         lastAnalysisTime = currentTime;
 
-        Bitmap bitmap = ImageUtils.imageProxyToBitmap(imageProxy);
+        Bitmap bitmap;
+        try {
+            bitmap = ImageUtils.imageProxyToBitmap(imageProxy);
+        } catch (Exception e) {
+            Log.e("MainActivity", "فشل في تحويل الصورة: " + e.getMessage());
+            imageProxy.close();
+            return;
+        }
+
         if (bitmap == null) {
+            Log.e("MainActivity", "Bitmap is null");
             imageProxy.close();
             return;
         }
 
         bitmap = rotateBitmap(bitmap, imageProxy.getImageInfo().getRotationDegrees());
-
         Bitmap finalBitmap = bitmap;
+
         cameraExecutor.execute(() -> {
-            String prediction = runModelInference(finalBitmap);
-            runOnUiThread(() -> Toast.makeText(MainActivity.this, "Detected: " + prediction, Toast.LENGTH_SHORT).show());
+            try {
+                String prediction = runModelInference(finalBitmap);
+
+                runOnUiThread(() -> {
+                    Toast.makeText(MainActivity.this, "تم التعرف: " + prediction, Toast.LENGTH_SHORT).show();
+
+                    if (scanIndicator != null) {
+                        scanIndicator.setAlpha(1f);
+                        scanIndicator.animate().alpha(0f).setDuration(500).start();
+                    }
+
+                    // Speak only if prediction is NOT "لا شيء"
+                    if (tts != null && !tts.isSpeaking()) {
+                        if (!prediction.contains("لم يتم التعرف")) {
+                            String spokenText = prediction.split(" \\(")[0]; // remove confidence %
+                            tts.speak(spokenText, TextToSpeech.QUEUE_FLUSH, null, "ScanResultID");
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                Log.e("MainActivity", "فشل الاستدلال: " + e.getMessage());
+                e.printStackTrace();
+            }
         });
 
         imageProxy.close();
@@ -158,6 +215,8 @@ public class MainActivity extends AppCompatActivity {
         float[][] output = new float[1][labels.length];
         tflite.run(input, output);
 
+        Log.d("TFLite", "Model output: " + Arrays.toString(output[0]));
+
         int maxIdx = 0;
         float maxConf = 0f;
         for (int i = 0; i < labels.length; i++) {
@@ -167,7 +226,14 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        return labels[maxIdx] + String.format(" (%.1f%%)", maxConf * 100);
+        String resultLabel = labels[maxIdx];
+        float confidence = maxConf;
+
+        if (resultLabel.equalsIgnoreCase("لا شيء") || confidence < 0.75f) {
+            return "لم يتم التعرف على الورقة نقدية";
+        }
+
+        return resultLabel + String.format(" (%.1f%%)", confidence * 100);
     }
 
     private Bitmap rotateBitmap(Bitmap bitmap, int rotationDegrees) {
@@ -178,9 +244,25 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        isAnalyzing = false;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        isAnalyzing = true;
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         if (tflite != null) tflite.close();
-        if (cameraExecutor != null) cameraExecutor.shutdown();
+        if (cameraExecutor != null) cameraExecutor.shutdownNow();
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+        }
     }
 }
