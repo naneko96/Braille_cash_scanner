@@ -1,9 +1,11 @@
 package com.example.brbscan;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -79,6 +81,9 @@ public class MainActivity extends AppCompatActivity {
         scanIndicator = binding.getRoot().findViewById(R.id.scanIndicator);
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
 
+        // Set up clickable footer "Powered by naneko96"
+        binding.bottomLeftText.setOnClickListener(v -> openGithub());
+
         try {
             tflite = new Interpreter(loadModelFile());
         } catch (IOException e) {
@@ -110,6 +115,13 @@ public class MainActivity extends AppCompatActivity {
         } else {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA);
         }
+    }
+
+    private void openGithub() {
+        String url = "https://github.com/naneko96";
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setData(Uri.parse(url));
+        startActivity(intent);
     }
 
     private MappedByteBuffer loadModelFile() throws IOException {
