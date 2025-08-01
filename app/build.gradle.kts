@@ -52,6 +52,12 @@ dependencies {
     // TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation ("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+
+
+    // If you need task API
+    implementation ("org.tensorflow:tensorflow-lite-task-vision:0.4.4")
+
 
     // Testing
     testImplementation("junit:junit:4.13.2")
@@ -60,5 +66,9 @@ dependencies {
 
     //lottie
     implementation("com.airbnb.android:lottie:6.4.0")
+
+    //gpu
+    implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.3")
+
 
 }

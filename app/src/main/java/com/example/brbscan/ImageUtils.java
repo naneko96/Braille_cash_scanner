@@ -6,13 +6,13 @@ import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.media.Image;
+import android.os.Build;
 import android.util.Log;
 
 import androidx.annotation.OptIn;
 import androidx.camera.core.ExperimentalGetImage;
 import androidx.camera.core.ImageProxy;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 
 public class ImageUtils {
@@ -27,8 +27,7 @@ public class ImageUtils {
         }
 
         try {
-            // Convert YUV to RGB with better quality
-            return convertYuvToRgb(image);
+            return convertYuvToRgbSafe(image);
         } catch (Exception e) {
             Log.e(TAG, "Conversion error", e);
             return null;
@@ -37,37 +36,43 @@ public class ImageUtils {
         }
     }
 
-    private static Bitmap convertYuvToRgb(Image image) throws Exception {
+    private static Bitmap convertYuvToRgbSafe(Image image) throws Exception {
         if (image.getFormat() != ImageFormat.YUV_420_888) {
-            throw new IllegalArgumentException("Invalid image format");
+            throw new IllegalArgumentException("Unsupported image format");
         }
 
         int width = image.getWidth();
         int height = image.getHeight();
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        int[] pixels = new int[width * height];
 
-        // Get the YUV planes
         Image.Plane[] planes = image.getPlanes();
         ByteBuffer yBuffer = planes[0].getBuffer();
         ByteBuffer uBuffer = planes[1].getBuffer();
         ByteBuffer vBuffer = planes[2].getBuffer();
 
-        // Create ARGB bitmap
-        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        int[] pixels = new int[width * height];
+        int yRowStride = planes[0].getRowStride();
+        int yPixelStride = planes[0].getPixelStride();
+        int uvRowStride = planes[1].getRowStride();
+        int uvPixelStride = planes[1].getPixelStride();
 
-        // Convert YUV to RGB (simplified conversion)
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
-                int yValue = yBuffer.get(y * planes[0].getRowStride() + x) & 0xff;
-                int uValue = uBuffer.get((y/2) * planes[1].getRowStride() + (x/2) * planes[1].getPixelStride()) & 0xff;
-                int vValue = vBuffer.get((y/2) * planes[2].getRowStride() + (x/2) * planes[2].getPixelStride()) & 0xff;
+                int yIndex = y * yRowStride + x * yPixelStride;
+                int uvX = x / 2;
+                int uvY = y / 2;
+                int uvIndex = uvY * uvRowStride + uvX * uvPixelStride;
+
+                int yValue = safeGet(yBuffer, yIndex);
+                int uValue = safeGet(uBuffer, uvIndex);
+                int vValue = safeGet(vBuffer, uvIndex);
 
                 // Convert YUV to RGB
-                int r = (int) (yValue + 1.402 * (vValue - 128));
-                int g = (int) (yValue - 0.34414 * (uValue - 128) - 0.71414 * (vValue - 128));
-                int b = (int) (yValue + 1.772 * (uValue - 128));
+                int r = yValue + (int)(1.402f * (vValue - 128));
+                int g = yValue - (int)(0.344f * (uValue - 128)) - (int)(0.714f * (vValue - 128));
+                int b = yValue + (int)(1.772f * (uValue - 128));
 
-                // Clamp values
+                // Clamp
                 r = Math.min(255, Math.max(0, r));
                 g = Math.min(255, Math.max(0, g));
                 b = Math.min(255, Math.max(0, b));
@@ -78,5 +83,12 @@ public class ImageUtils {
 
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height);
         return bitmap;
+    }
+
+    private static int safeGet(ByteBuffer buffer, int index) {
+        if (index < 0 || index >= buffer.limit()) {
+            return 128; // Neutral for U/V, fallback for Y
+        }
+        return buffer.get(index) & 0xff;
     }
 }

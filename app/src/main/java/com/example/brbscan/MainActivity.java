@@ -3,7 +3,6 @@ package com.example.brbscan;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.graphics.Color;
 import android.graphics.Matrix;
 import android.os.Bundle;
 import android.os.VibrationEffect;
@@ -18,6 +17,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
@@ -48,15 +48,16 @@ public class MainActivity extends AppCompatActivity {
     private TextToSpeech tts;
     private View scanIndicator;
     private Vibrator vibrator;
+    private Camera camera;
 
     private static final int MODEL_INPUT_SIZE = 224;
     private static final String MODEL_PATH = "banknote_model.tflite";
     private final String[] labels = {"خمسة دنانير", "عشرة دنانير", "عشرون دينار", "خمسون دينار", "لا شيء"};
 
-    // Modified confidence thresholds
-    private static final float GENERAL_THRESHOLD = 0.45f;  // Reduced from 0.65f
-    private static final float FIFTY_DINAR_THRESHOLD = 0.65f;  // Reduced from 0.75f
-    private static final float FIFTY_DINAR_PENALTY = 0.10f;  // Reduced from 0.15f
+    private static final float GENERAL_THRESHOLD = 0.45f;
+    private static final float FIFTY_DINAR_THRESHOLD = 0.65f;
+    private static final float FIFTY_DINAR_PENALTY = 0.10f;
+    private static final float TWENTY_DINAR_BOOST = 0.10f;
 
     private long lastAnalysisTime = 0;
     private boolean isAnalyzing = true;
@@ -80,9 +81,7 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             tflite = new Interpreter(loadModelFile());
-            Log.d("Model", "Model loaded successfully");
         } catch (IOException e) {
-            Log.e("Model", "Failed to load model", e);
             showToast("فشل في تحميل النموذج", Toast.LENGTH_LONG);
             finish();
             return;
@@ -92,10 +91,7 @@ public class MainActivity extends AppCompatActivity {
 
         tts = new TextToSpeech(this, status -> {
             if (status == TextToSpeech.SUCCESS) {
-                int result = tts.setLanguage(new Locale("ar"));
-                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    Log.e("TTS", "اللغة العربية غير مدعومة");
-                }
+                tts.setLanguage(new Locale("ar"));
             }
         });
 
@@ -105,7 +101,7 @@ public class MainActivity extends AppCompatActivity {
                     if (isGranted) {
                         startCamera();
                     } else {
-                        showToast("تم رفض إذن الكاميرا");
+                        showToast("تم رفض إذن الكاميرا", Toast.LENGTH_LONG);
                     }
                 });
 
@@ -145,11 +141,14 @@ public class MainActivity extends AppCompatActivity {
                 CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
 
                 cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
+                camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
+
+                if (camera.getCameraInfo().hasFlashUnit()) {
+                    camera.getCameraControl().enableTorch(true);
+                }
 
             } catch (Exception e) {
-                Log.e("Camera", "Failed to start camera", e);
-                showToast("فشل في تشغيل الكاميرا");
+                showToast("فشل في تشغيل الكاميرا", Toast.LENGTH_LONG);
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -169,14 +168,10 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             Bitmap bitmap = ImageUtils.imageProxyToBitmap(imageProxy);
-            if (bitmap == null) {
-                Log.e("Camera", "Failed to convert ImageProxy to Bitmap");
-                imageProxy.close();
-                return;
+            if (bitmap != null) {
+                bitmap = rotateAndEnhanceBitmap(bitmap, imageProxy.getImageInfo().getRotationDegrees());
+                processImageForInference(bitmap);
             }
-
-            bitmap = rotateAndEnhanceBitmap(bitmap, imageProxy.getImageInfo().getRotationDegrees());
-            processImageForInference(bitmap);
         } catch (Exception e) {
             Log.e("Camera", "Error processing image", e);
         } finally {
@@ -201,32 +196,7 @@ public class MainActivity extends AppCompatActivity {
             matrix.postRotate(rotationDegrees);
             bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
         }
-        return enhanceContrast(bitmap);
-    }
-
-    private Bitmap enhanceContrast(Bitmap src) {
-        Bitmap dst = src.copy(src.getConfig(), true);
-        int[] pixels = new int[dst.getWidth() * dst.getHeight()];
-        dst.getPixels(pixels, 0, dst.getWidth(), 0, 0, dst.getWidth(), dst.getHeight());
-
-        for (int i = 0; i < pixels.length; i++) {
-            int r = Color.red(pixels[i]);
-            int g = Color.green(pixels[i]);
-            int b = Color.blue(pixels[i]);
-
-            r = (int) (255 * Math.pow(r / 255.0, 0.7));
-            g = (int) (255 * Math.pow(g / 255.0, 0.7));
-            b = (int) (255 * Math.pow(b / 255.0, 0.7));
-
-            r = Math.min(255, Math.max(0, r));
-            g = Math.min(255, Math.max(0, g));
-            b = Math.min(255, Math.max(0, b));
-
-            pixels[i] = Color.rgb(r, g, b);
-        }
-
-        dst.setPixels(pixels, 0, dst.getWidth(), 0, 0, dst.getWidth(), dst.getHeight());
-        return dst;
+        return bitmap;
     }
 
     private PredictionResult runModelInference(Bitmap bitmap) {
@@ -236,13 +206,9 @@ public class MainActivity extends AppCompatActivity {
         for (int y = 0; y < MODEL_INPUT_SIZE; y++) {
             for (int x = 0; x < MODEL_INPUT_SIZE; x++) {
                 int pixel = resized.getPixel(x, y);
-                float r = (float) Math.pow(((pixel >> 16) & 0xFF) / 255.0, 2.2);
-                float g = (float) Math.pow(((pixel >> 8) & 0xFF) / 255.0, 2.2);
-                float b = (float) Math.pow((pixel & 0xFF) / 255.0, 2.2);
-
-                input[0][y][x][0] = (r - 0.5f) * 2.0f;
-                input[0][y][x][1] = (g - 0.5f) * 2.0f;
-                input[0][y][x][2] = (b - 0.5f) * 2.0f;
+                input[0][y][x][0] = ((pixel >> 16 & 0xFF) / 127.5f) - 1;
+                input[0][y][x][1] = ((pixel >> 8 & 0xFF) / 127.5f) - 1;
+                input[0][y][x][2] = ((pixel & 0xFF) / 127.5f) - 1;
             }
         }
 
@@ -251,15 +217,11 @@ public class MainActivity extends AppCompatActivity {
 
         float[] probs = softmaxWithTemperature(output[0], 0.8f);
 
-        // Debug logging of raw probabilities
-        Log.d("ModelDebug", "Raw probabilities: " + Arrays.toString(probs));
+        int fiftyIdx = Arrays.asList(labels).indexOf("خمسون دينار");
+        if (fiftyIdx >= 0) probs[fiftyIdx] *= (1f - FIFTY_DINAR_PENALTY);
 
-        // Apply penalty to 50 dinar
-        int fiftyIndex = Arrays.asList(labels).indexOf("خمسون دينار");
-        if (fiftyIndex >= 0) {
-            probs[fiftyIndex] *= (1f - FIFTY_DINAR_PENALTY);
-            Log.d("ModelDebug", "After penalty - 50 dinar prob: " + probs[fiftyIndex]);
-        }
+        int twentyIdx = Arrays.asList(labels).indexOf("عشرون دينار");
+        if (twentyIdx >= 0) probs[twentyIdx] *= (1f + TWENTY_DINAR_BOOST);
 
         int bestIdx = 0;
         float maxProb = probs[0];
@@ -270,15 +232,9 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Debug logging of best detection
-        Log.d("ModelDebug", "Best detection: " + labels[bestIdx] + " with confidence: " + maxProb +
-                " (Threshold: " + GENERAL_THRESHOLD + ")");
-
         if (labels[bestIdx].equals("خمسون دينار")) {
             consecutiveFiftyDetections++;
             if (consecutiveFiftyDetections < MAX_CONSECUTIVE_FIFTY_DETECTIONS || maxProb < FIFTY_DINAR_THRESHOLD) {
-                noDetectionCount++;
-                Log.d("ModelDebug", "50 dinar detection rejected - consecutive: " + consecutiveFiftyDetections);
                 return new PredictionResult("لا شيء", maxProb);
             }
         } else {
@@ -286,14 +242,11 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (maxProb >= GENERAL_THRESHOLD && !labels[bestIdx].equals("لا شيء")) {
-            noDetectionCount = 0;
-            Log.d("ModelDebug", "Valid detection: " + labels[bestIdx]);
             return new PredictionResult(labels[bestIdx], maxProb);
         }
 
-        noDetectionCount++;
-        Log.d("ModelDebug", "No valid detection - best confidence below threshold");
-        return new PredictionResult("لا شيء", maxProb);
+        return (maxProb >= 0.3f) ? new PredictionResult(labels[bestIdx], maxProb)
+                : new PredictionResult("لا شيء", maxProb);
     }
 
     private float[] softmaxWithTemperature(float[] logits, float temperature) {
@@ -303,32 +256,23 @@ public class MainActivity extends AppCompatActivity {
             exp[i] = (float) Math.exp(logits[i] / temperature);
             sum += exp[i];
         }
-        for (int i = 0; i < exp.length; i++) {
+        for (int i = 0; i < logits.length; i++) {
             exp[i] /= sum;
         }
         return exp;
     }
 
-    private synchronized void handlePredictionResult(PredictionResult result) {
+    private void handlePredictionResult(PredictionResult result) {
         runOnUiThread(() -> {
-            // Debug output
-            Log.d("Detection", "Handling result - Label: " + result.label + ", Confidence: " + result.confidence);
-
             if (result.label.equals("لا شيء")) {
-                if (noDetectionCount >= NO_DETECTION_THRESHOLD) {
-                    showToast("الرجاء توجيه الكاميرا نحو الورقة النقدية");
+                if (++noDetectionCount >= NO_DETECTION_THRESHOLD) {
+                    showToast("الرجاء توجيه الكاميرا نحو الورقة النقدية", Toast.LENGTH_LONG);
                 }
                 return;
             }
 
-            // Check confidence again in case of race conditions
-            if (result.confidence < GENERAL_THRESHOLD) {
-                Log.d("Detection", "Low confidence result filtered out");
-                return;
-            }
-
-            String text = result.label + String.format(Locale.getDefault(), " (%.1f%%)", result.confidence * 100);
-            showToast("تم التعرف: " + text);
+            noDetectionCount = 0;
+            showToast("تم التعرف: " + result.label, Toast.LENGTH_LONG);
 
             if (scanIndicator != null) {
                 scanIndicator.setAlpha(1f);
@@ -342,15 +286,9 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void showToast(String message) {
-        showToast(message, Toast.LENGTH_SHORT);
-    }
-
     private void showToast(String message, int duration) {
         runOnUiThread(() -> {
-            if (currentToast != null) {
-                currentToast.cancel();
-            }
+            if (currentToast != null) currentToast.cancel();
             currentToast = Toast.makeText(this, message, duration);
             currentToast.show();
         });
@@ -360,16 +298,12 @@ public class MainActivity extends AppCompatActivity {
         if (vibrator == null || !vibrator.hasVibrator()) return;
 
         long[] pattern;
-        if (label.contains("خمسة دنانير")) {
-            pattern = new long[]{0, 200};
-        } else if (label.contains("عشرة دنانير")) {
-            pattern = new long[]{0, 200, 300, 200};
-        } else if (label.contains("عشرون دينار")) {
-            pattern = new long[]{0, 600};
-        } else if (label.contains("خمسون دينار")) {
-            pattern = new long[]{0, 600, 400, 600};
-        } else {
-            return;
+        switch (label) {
+            case "خمسة دنانير": pattern = new long[]{0, 200}; break;
+            case "عشرة دنانير": pattern = new long[]{0, 200, 300, 200}; break;
+            case "عشرون دينار": pattern = new long[]{0, 600}; break;
+            case "خمسون دينار": pattern = new long[]{0, 600, 400, 600}; break;
+            default: return;
         }
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
@@ -402,9 +336,7 @@ public class MainActivity extends AppCompatActivity {
             tts.stop();
             tts.shutdown();
         }
-        if (currentToast != null) {
-            currentToast.cancel();
-        }
+        if (currentToast != null) currentToast.cancel();
     }
 
     private static class PredictionResult {
